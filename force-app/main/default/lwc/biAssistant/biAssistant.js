@@ -1,5 +1,6 @@
-import { LightningElement, track } from 'lwc';
+import { LightningElement, track, wire } from 'lwc';
 import askQuestion from '@salesforce/apex/BIAssistantController.askQuestion';
+import getAvailableModels from '@salesforce/apex/BIAssistantController.getAvailableModels';
 
 /**
  * biAssistant
@@ -19,6 +20,8 @@ import askQuestion from '@salesforce/apex/BIAssistantController.askQuestion';
 export default class BiAssistant extends LightningElement {
 
     question = '';
+    selectedModel = '';
+    @track modelOptions = [];
 
     /**
      * Internal conversation history sent to Apex (mirrors the Models API
@@ -26,6 +29,22 @@ export default class BiAssistant extends LightningElement {
      * directly — it is purely the LLM's context window.
      */
     @track conversationHistory = [];
+
+    /** Load available models via cacheable wire */
+    @wire(getAvailableModels)
+    wiredModels({ data, error }) {
+        if (data) {
+            this.modelOptions = data.map(m => ({
+                label: m.label,
+                value: m.value
+            }));
+            if (this.modelOptions.length > 0 && !this.selectedModel) {
+                this.selectedModel = this.modelOptions[0].value;
+            }
+        } else if (error) {
+            console.error('Failed to load models:', error);
+        }
+    }
 
     /**
      * Display messages shown in the UI thread.
@@ -58,7 +77,15 @@ export default class BiAssistant extends LightningElement {
         return this.displayMessages.length > 0;
     }
 
+    get hasModels() {
+        return this.modelOptions.length > 0;
+    }
+
     // ── Event handlers ──────────────────────────────────────────
+
+    handleModelChange(event) {
+        this.selectedModel = event.detail.value;
+    }
 
     handleQuestionChange(event) {
         this.question = event.target.value;
@@ -103,7 +130,8 @@ export default class BiAssistant extends LightningElement {
             // 4. Call Apex with full conversation history
             const result = await askQuestion({
                 question: userQuestion,
-                conversationHistoryJson: JSON.stringify(this.conversationHistory)
+                conversationHistoryJson: JSON.stringify(this.conversationHistory),
+                modelName: this.selectedModel || null
             });
 
             // 5. Remove loading bubble

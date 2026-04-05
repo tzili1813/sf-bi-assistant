@@ -18,12 +18,31 @@
 public with sharing class BIAssistantController {
 
     // ── Model configuration ─────────────────────────────────────────────
-    // Update to match your Einstein Studio model API name.
-    // Common:  sfdc_ai__DefaultGPT4Omni, sfdc_ai__DefaultOpenAIGPT4OmniMini
-    private static final String MODEL_NAME = 'sfdc_ai__DefaultGPT4Omni';
+    private static final String DEFAULT_MODEL = 'sfdc_ai__DefaultGPT4Omni';
     private static final Integer MAX_HISTORY_MESSAGES = 30; // ~10 turns of context
 
-    // ── Return wrapper ──────────────────────────────────────────────────
+    // Available models for the UI picker.
+    // Add or remove entries to match your org's Einstein Studio configuration.
+    private static final List<ModelOption> MODEL_OPTIONS = new List<ModelOption>{
+        new ModelOption('sfdc_ai__DefaultGPT4Omni',                       'GPT-4o'),
+        new ModelOption('sfdc_ai__DefaultOpenAIGPT4OmniMini',             'GPT-4o mini'),
+        new ModelOption('sfdc_ai__DefaultBedrockAnthropicClaude35Sonnet',  'Claude 3.5 Sonnet'),
+        new ModelOption('sfdc_ai__DefaultBedrockAnthropicClaude3Sonnet',   'Claude 3 Sonnet'),
+        new ModelOption('sfdc_ai__DefaultBedrockAnthropicClaude3Haiku',    'Claude 3 Haiku'),
+        new ModelOption('sfdc_ai__DefaultGPT4',                           'GPT-4'),
+        new ModelOption('sfdc_ai__DefaultGPT35Turbo',                     'GPT-3.5 Turbo')
+    };
+
+    // ── Return wrappers ─────────────────────────────────────────────────
+    public class ModelOption {
+        @AuraEnabled public String value;
+        @AuraEnabled public String label;
+        public ModelOption(String value, String label) {
+            this.value = value;
+            this.label = label;
+        }
+    }
+
     public class BIResult {
         @AuraEnabled public String  analysisHtml;          // Pass 2 HTML output
         @AuraEnabled public String  errorMessage;
@@ -38,13 +57,20 @@ public with sharing class BIAssistantController {
         @AuraEnabled public List<Map<String, Object>> rows;
     }
 
+    // ── Model list (called from LWC on load) ─────────────────────────────
+    @AuraEnabled(cacheable=true)
+    public static List<ModelOption> getAvailableModels() {
+        return MODEL_OPTIONS;
+    }
+
     // ── Main entry point (called from LWC) ──────────────────────────────
     /**
      * @param question              The user's new natural-language question
      * @param conversationHistoryJson  JSON-serialised List<BIChatMessage> from prior turns
+     * @param modelName             API name of the model to use (null = default)
      */
     @AuraEnabled
-    public static BIResult askQuestion(String question, String conversationHistoryJson) {
+    public static BIResult askQuestion(String question, String conversationHistoryJson, String modelName) {
         BIResult result = new BIResult();
 
         try {
@@ -68,8 +94,11 @@ public with sharing class BIAssistantController {
             // 3. Current user question
             pass1Messages.add(new BIChatMessage('user', question));
 
+            // Resolve model name (use provided or default)
+            String resolvedModel = String.isNotBlank(modelName) ? modelName : DEFAULT_MODEL;
+
             // 4. Call the LLM
-            String llmJson = callChatLLM(pass1Messages);
+            String llmJson = callChatLLM(pass1Messages, resolvedModel);
 
             // 5. Parse + validate + execute
             List<QueryExecution> executions = parseAndExecuteQueries(llmJson);
@@ -84,7 +113,7 @@ public with sharing class BIAssistantController {
             pass2Messages.add(new BIChatMessage('system', pass2SystemPrompt()));
             pass2Messages.add(new BIChatMessage('user', pass2User));
 
-            String analysisHtml = callChatLLM(pass2Messages);
+            String analysisHtml = callChatLLM(pass2Messages, resolvedModel);
             analysisHtml = stripCodeFences(analysisHtml);
             result.analysisHtml = analysisHtml;
 
@@ -249,7 +278,7 @@ public with sharing class BIAssistantController {
     //  LLM CALL  –  Multi-turn via Models API createChatGenerations
     // ════════════════════════════════════════════════════════════════════
 
-    private static String callChatLLM(List<BIChatMessage> chatMessages) {
+    private static String callChatLLM(List<BIChatMessage> chatMessages, String modelName) {
         aiplatform.ModelsAPI modelsAPI = new aiplatform.ModelsAPI();
 
         // Convert our BIChatMessage list into the Models API request format
@@ -272,7 +301,7 @@ public with sharing class BIAssistantController {
         // Build the request wrapper
         aiplatform.ModelsAPI.createChatGenerations_Request request =
             new aiplatform.ModelsAPI.createChatGenerations_Request();
-        request.modelName = MODEL_NAME;
+        request.modelName = modelName;
         request.body      = body;
 
         // Execute with error handling for callout failures

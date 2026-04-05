@@ -1,5 +1,19 @@
 <template>
     <lightning-card title="BI Assistant" icon-name="standard:insights">
+        <!-- Model selector in card header -->
+        <template if:true={hasModels}>
+            <div slot="actions" class="model-selector">
+                <lightning-combobox
+                    label="Model"
+                    value={selectedModel}
+                    options={modelOptions}
+                    onchange={handleModelChange}
+                    variant="label-hidden"
+                    dropdown-alignment="right"
+                    disabled={isLoading}
+                ></lightning-combobox>
+            </div>
+        </template>
         <div class="slds-p-around_medium">
 
             <!-- Conversation Thread -->
