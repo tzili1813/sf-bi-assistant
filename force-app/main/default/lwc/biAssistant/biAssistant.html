@@ -1,0 +1,123 @@
+<template>
+    <lightning-card title="BI Assistant" icon-name="standard:insights">
+        <div class="slds-p-around_medium">
+
+            <!-- Conversation Thread -->
+            <template if:true={hasMessages}>
+                <div class="conversation-thread slds-m-bottom_medium">
+                    <template for:each={displayMessages} for:item="msg">
+                        <div key={msg.id} class={msg.containerClass}>
+                            <div class={msg.bubbleClass}>
+                                <!-- User question -->
+                                <template if:true={msg.isUser}>
+                                    <p class="slds-text-body_regular">{msg.text}</p>
+                                </template>
+                                <!-- Assistant HTML analysis -->
+                                <template if:true={msg.isAssistant}>
+                                    <div class="analysis-content"
+                                         lwc:dom="manual"
+                                         data-msg-id={msg.id}></div>
+                                    <!-- Charts -->
+                                    <template if:true={msg.visualizations}>
+                                        <template for:each={msg.visualizations} for:item="viz">
+                                            <c-bi-chart
+                                                key={viz.id}
+                                                chart-config={viz}
+                                                height="300"
+                                            ></c-bi-chart>
+                                        </template>
+                                    </template>
+                                </template>
+                                <!-- Loading state -->
+                                <template if:true={msg.isLoading}>
+                                    <div class="slds-grid slds-grid_vertical-align-center">
+                                        <lightning-spinner
+                                            alternative-text="Analyzing..."
+                                            size="small"
+                                        ></lightning-spinner>
+                                        <span class="slds-m-left_small slds-text-body_regular">
+                                            {loadingMessage}
+                                        </span>
+                                    </div>
+                                </template>
+                                <!-- Error -->
+                                <template if:true={msg.isError}>
+                                    <div class="error-msg">
+                                        <lightning-icon
+                                            icon-name="utility:error"
+                                            size="x-small"
+                                            variant="error"
+                                            class="slds-m-right_x-small"
+                                        ></lightning-icon>
+                                        <span>{msg.text}</span>
+                                    </div>
+                                </template>
+                                <!-- Timestamp -->
+                                <template if:true={msg.showTimestamp}>
+                                    <span class="msg-timestamp">{msg.timestamp}</span>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Example Questions (shown only when conversation is empty) -->
+            <template if:false={hasMessages}>
+                <div class="slds-m-bottom_medium slds-p-around_medium example-box">
+                    <p class="slds-text-heading_small slds-m-bottom_small">
+                        Ask questions about your CRM data in plain English
+                    </p>
+                    <p class="slds-text-body_small slds-text-color_weak slds-m-bottom_small">
+                        Try one of these to get started:
+                    </p>
+                    <div class="slds-grid slds-wrap slds-gutters_xx-small">
+                        <template for:each={exampleQuestions} for:item="ex">
+                            <div key={ex} class="slds-col slds-size_1-of-1 slds-medium-size_1-of-2 slds-m-bottom_xx-small">
+                                <button
+                                    class="slds-button slds-button_neutral example-btn"
+                                    onclick={handleExampleClick}
+                                >{ex}</button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Input Bar (always visible at bottom) -->
+            <div class="input-bar slds-grid slds-gutters_xx-small slds-grid_vertical-align-end">
+                <div class="slds-col slds-size_9-of-12 slds-medium-size_10-of-12">
+                    <lightning-input
+                        label=""
+                        variant="label-hidden"
+                        placeholder="Ask a follow-up or new question..."
+                        value={question}
+                        onchange={handleQuestionChange}
+                        onkeyup={handleKeyUp}
+                        disabled={isLoading}
+                    ></lightning-input>
+                </div>
+                <div class="slds-col slds-size_3-of-12 slds-medium-size_2-of-12">
+                    <lightning-button
+                        variant="brand"
+                        label="Ask"
+                        onclick={handleAsk}
+                        disabled={isAskDisabled}
+                        class="full-width-btn"
+                    ></lightning-button>
+                </div>
+            </div>
+
+            <!-- Clear conversation link -->
+            <template if:true={hasMessages}>
+                <div class="slds-m-top_x-small slds-text-align_right">
+                    <button class="slds-button slds-button_reset slds-text-body_small clear-btn"
+                            onclick={handleClearConversation}>
+                        Clear conversation
+                    </button>
+                </div>
+            </template>
+
+        </div>
+    </lightning-card>
+</template>

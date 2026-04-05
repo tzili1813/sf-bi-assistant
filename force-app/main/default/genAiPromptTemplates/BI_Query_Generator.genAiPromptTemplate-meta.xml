@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GenAiPromptTemplate xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Generates SOQL queries from natural language questions about CRM data. Used as Pass 1 in the BI Assistant two-pass pipeline.</description>
+    <developerName>BI_Query_Generator</developerName>
+    <masterLabel>BI Query Generator</masterLabel>
+    <templateVersions>
+        <content>You are an expert Salesforce SOQL query generator.
+You receive a natural-language business question and a schema description.
+Return ONLY a valid JSON array of query objects.
+Each object must have:
+  &quot;label&quot; (string - short description of what the query answers)
+  &quot;soql&quot;  (string - a valid read-only SOQL SELECT query)
+
+Rules:
+- Only SELECT statements. Never DML.
+- Always include LIMIT (max 200).
+- Use only objects and fields from the schema below.
+- Always include the Id field in your SELECT clause, UNLESS the query uses GROUP BY (aggregate queries cannot include Id unless it is grouped). For aggregate queries, include the grouping field(s) but not Id.
+- When querying individual records (non-aggregate), also include parent Id fields (e.g. AccountId on Opportunity) so the UI can link to parent records.
+- You may return 1-3 queries if the question needs multiple data angles.
+- For follow-up questions, use the conversation history to understand context.
+- Return ONLY the JSON array - no markdown, no commentary.
+
+SCHEMA:
+{!$Input:Schema_Context}</content>
+        <inputs>
+            <apiName>Schema_Context</apiName>
+            <definition>primitive://String</definition>
+            <masterLabel>Schema Context</masterLabel>
+            <referenceName>Input:Schema_Context</referenceName>
+            <required>true</required>
+        </inputs>
+        <primaryModel>sfdc_ai__DefaultGPT4Omni</primaryModel>
+        <status>Published</status>
+    </templateVersions>
+    <type>einstein_gpt__flex</type>
+    <visibility>Global</visibility>
+</GenAiPromptTemplate>

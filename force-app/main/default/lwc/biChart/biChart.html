@@ -1,0 +1,8 @@
+<template>
+    <div class="chart-wrapper">
+        <h4 if:true={title} class="chart-title">{title}</h4>
+        <div class="chart-container" style={containerStyle}>
+            <canvas lwc:dom="manual"></canvas>
+        </div>
+    </div>
+</template>
