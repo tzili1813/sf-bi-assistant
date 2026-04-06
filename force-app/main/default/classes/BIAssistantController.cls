@@ -48,6 +48,8 @@ public with sharing class BIAssistantController {
         @AuraEnabled public String  errorMessage;
         @AuraEnabled public List<QueryExecution> queries;  // Pass 1 execution details
         @AuraEnabled public List<BIChatMessage> updatedHistory; // history to store in LWC
+        @AuraEnabled public List<String> suggestedFollowUps;   // follow-up questions
+        @AuraEnabled public List<BIActionProposal> suggestedActions; // LLM-proposed actions
     }
 
     public class QueryExecution {
@@ -63,7 +65,23 @@ public with sharing class BIAssistantController {
         return MODEL_OPTIONS;
     }
 
-    // ── Main entry point (called from LWC) ──────────────────────────────
+    // ── Action confirmation (called when user clicks "Execute") ────────
+    @AuraEnabled
+    public static BIActionExecutor.ActionResult confirmAction(String actionJson) {
+        try {
+            BIActionProposal proposal = (BIActionProposal) JSON.deserialize(
+                actionJson, BIActionProposal.class
+            );
+            BIActionValidator.validate(proposal);
+            return BIActionExecutor.execute(proposal);
+        } catch (AuraHandledException ahe) {
+            return new BIActionExecutor.ActionResult(false, null, ahe.getMessage());
+        } catch (Exception ex) {
+            return new BIActionExecutor.ActionResult(false, null, ex.getMessage());
+        }
+    }
+
+    // ── Main entry point (called from LWC) ──────────���───────────────────
     /**
      * @param question              The user's new natural-language question
      * @param conversationHistoryJson  JSON-serialised List<BIChatMessage> from prior turns
@@ -113,9 +131,67 @@ public with sharing class BIAssistantController {
             pass2Messages.add(new BIChatMessage('system', pass2SystemPrompt()));
             pass2Messages.add(new BIChatMessage('user', pass2User));
 
-            String analysisHtml = callChatLLM(pass2Messages, resolvedModel);
-            analysisHtml = stripCodeFences(analysisHtml);
-            result.analysisHtml = analysisHtml;
+            String pass2Raw = callChatLLM(pass2Messages, resolvedModel);
+            pass2Raw = stripCodeFences(pass2Raw);
+
+            // Parse delimited sections from the response (in reverse order):
+            // HTML ===VISUALIZATIONS=== charts ===ACTIONS=== actions ===SUGGESTIONS=== suggestions
+            String remaining = pass2Raw;
+
+            // 1. Extract ===SUGGESTIONS=== (last section)
+            result.suggestedFollowUps = new List<String>();
+            String suggestionsDelimiter = '===SUGGESTIONS===';
+            Integer sugIdx = remaining.indexOf(suggestionsDelimiter);
+            if (sugIdx > -1) {
+                String suggestionsJson = remaining.substring(sugIdx + suggestionsDelimiter.length()).trim();
+                remaining = remaining.substring(0, sugIdx).trim();
+                try {
+                    List<Object> sugList = (List<Object>) JSON.deserializeUntyped(suggestionsJson);
+                    for (Object s : sugList) {
+                        result.suggestedFollowUps.add(String.valueOf(s));
+                    }
+                } catch (Exception ex) {
+                    // Malformed suggestions — ignore gracefully
+                }
+            }
+
+            // 2. Extract ===ACTIONS=== (middle section)
+            result.suggestedActions = new List<BIActionProposal>();
+            String actionsDelimiter = '===ACTIONS===';
+            Integer actIdx = remaining.indexOf(actionsDelimiter);
+            if (actIdx > -1) {
+                String actionsJson = remaining.substring(actIdx + actionsDelimiter.length()).trim();
+                remaining = remaining.substring(0, actIdx).trim();
+                try {
+                    List<Object> actList = (List<Object>) JSON.deserializeUntyped(actionsJson);
+                    Integer idx = 0;
+                    for (Object a : actList) {
+                        Map<String, Object> aMap = (Map<String, Object>) a;
+                        BIActionProposal proposal = new BIActionProposal();
+                        proposal.actionType  = (String) aMap.get('type');
+                        proposal.label       = (String) aMap.get('label');
+                        proposal.sobjectType = (String) aMap.get('sobjectType');
+                        proposal.reasoning   = (String) aMap.get('reasoning');
+                        proposal.proposalId  = 'action-' + idx;
+
+                        // Parse fields map
+                        Object fieldsObj = aMap.get('fields');
+                        if (fieldsObj instanceof Map<String, Object>) {
+                            proposal.fields = (Map<String, Object>) fieldsObj;
+                        } else {
+                            proposal.fields = new Map<String, Object>();
+                        }
+
+                        result.suggestedActions.add(proposal);
+                        idx++;
+                    }
+                } catch (Exception ex) {
+                    // Malformed actions — ignore gracefully
+                    System.debug(LoggingLevel.WARN, 'Failed to parse ===ACTIONS=== section: ' + ex.getMessage());
+                }
+            }
+
+            result.analysisHtml = remaining;
 
             // ═══════════════════════════════════════════════════════════
             //  Update conversation history for next turn
@@ -168,6 +244,9 @@ public with sharing class BIAssistantController {
              + '(e.g. AccountId on Opportunity) so the UI can link to parent records.\n'
              + '- You may return 1-3 queries if the question needs multiple data angles.\n'
              + '- For follow-up questions, use the conversation history to understand context.\n'
+             + '- When the question involves time periods (this quarter, this month, last year, etc.), '
+             + 'generate an ADDITIONAL comparative query for the prior period so the analyst can show '
+             + 'period-over-period trends. For example, if asked about "this quarter", also query LAST_QUARTER.\n'
              + '- Return ONLY the JSON array — no markdown, no commentary.\n\n'
              + 'SCHEMA:\n' + schema;
     }
@@ -242,7 +321,43 @@ public with sharing class BIAssistantController {
              + '- For currency values, provide raw numbers (the UI will format them).\n'
              + '- Round percentages to 1 decimal place.\n'
              + '- If the query returned 0 or 1 records, skip the chart and use text only.\n\n'
-             + 'IMPORTANT: Return ONLY the HTML followed by ===VISUALIZATIONS=== followed by the JSON array.\n'
+             + 'ACTIONABLE SUGGESTIONS:\n'
+             + 'When the analysis reveals situations that call for action (stale deals, unresolved cases, '
+             + 'missing follow-ups, overdue tasks), suggest concrete Salesforce actions the user can take.\n'
+             + 'Include an ===ACTIONS=== section after the visualizations containing a JSON array of action objects.\n'
+             + 'Each action object must have:\n'
+             + '  "type": one of [create_task, create_event, update_case_status, create_followup, log_call, update_opp_stage]\n'
+             + '  "label": short human-readable description (e.g., "Create follow-up task for Acme Corp")\n'
+             + '  "sobjectType": the Salesforce object (Task, Event, Case, Opportunity)\n'
+             + '  "fields": { field API name → value } using exact Ids from the query results\n'
+             + '  "reasoning": one sentence explaining why this action is recommended\n\n'
+             + 'ACTION RULES:\n'
+             + '- Only suggest actions when the data naturally leads to them — do not force actions.\n'
+             + '- Maximum 3 actions per response.\n'
+             + '- Use exact record Ids from the query results for WhoId, WhatId, AccountId, etc.\n'
+             + '- For dates, use YYYY-MM-DD format.\n'
+             + '- For tasks, set Status to "Not Started" and provide a meaningful Subject.\n'
+             + '- If no actions are appropriate, include an empty array: ===ACTIONS===\\n[]\\n\n\n'
+             + 'ANOMALY & TREND DETECTION:\n'
+             + '- If any metric is significantly above or below the average (>2x or <0.5x), call it out with a warning icon.\n'
+             + '- When comparative data for two periods is available, show the change with directional indicators: '
+             + 'use a green arrow or "up X%" for positive trends, red arrow or "down X%" for negative trends.\n'
+             + '- Highlight the top 3 most notable data points or outliers.\n\n'
+             + 'FOLLOW-UP SUGGESTIONS:\n'
+             + 'After the visualizations section, include a third section separated by ===SUGGESTIONS===\n'
+             + 'This section must contain a JSON array of exactly 3 short follow-up questions the user might '
+             + 'want to ask next based on the data they just saw. Make them specific and actionable.\n\n'
+             + 'COMPLETE OUTPUT FORMAT:\n'
+             + '<html analysis>\n'
+             + '===VISUALIZATIONS===\n'
+             + '[chart configs JSON array]\n'
+             + '===ACTIONS===\n'
+             + '[action objects JSON array, or empty array]\n'
+             + '===SUGGESTIONS===\n'
+             + '["Follow-up question 1?","Follow-up question 2?","Follow-up question 3?"]\n\n'
+             + 'IMPORTANT: Return ONLY the HTML, then ===VISUALIZATIONS===, then chart JSON, '
+             + 'then ===ACTIONS===, then actions JSON array, '
+             + 'then ===SUGGESTIONS===, then suggestions JSON array.\n'
              + 'No markdown fences, no commentary, no wrapping.';
     }
 
@@ -276,12 +391,18 @@ public with sharing class BIAssistantController {
 
     // ════════════════════════════════════════════════════════════════════
     //  LLM CALL  –  Multi-turn via Models API createChatGenerations
+    //  Includes retry (1 attempt) + fallback chain for resilience
     // ════════════════════════════════════════════════════════════════════
 
-    private static String callChatLLM(List<BIChatMessage> chatMessages, String modelName) {
-        aiplatform.ModelsAPI modelsAPI = new aiplatform.ModelsAPI();
+    // Fallback models tried when the primary model fails
+    private static final List<String> FALLBACK_MODELS = new List<String>{
+        'sfdc_ai__DefaultGPT4Omni',
+        'sfdc_ai__DefaultOpenAIGPT4OmniMini',
+        'sfdc_ai__DefaultBedrockAnthropicClaude3Haiku'
+    };
 
-        // Convert our BIChatMessage list into the Models API request format
+    private static String callChatLLM(List<BIChatMessage> chatMessages, String modelName) {
+        // Build API messages once (reused across retries/fallbacks)
         List<aiplatform.ModelsAPI_ChatMessageRequest> apiMessages =
             new List<aiplatform.ModelsAPI_ChatMessageRequest>();
 
@@ -293,28 +414,60 @@ public with sharing class BIAssistantController {
             apiMessages.add(apiMsg);
         }
 
-        // Build request body
         aiplatform.ModelsAPI_ChatGenerationsRequest body =
             new aiplatform.ModelsAPI_ChatGenerationsRequest();
         body.messages = apiMessages;
 
-        // Build the request wrapper
+        // Try primary model first (with 1 retry), then fallbacks
+        List<String> modelsToTry = new List<String>{ modelName };
+        for (String fb : FALLBACK_MODELS) {
+            if (fb != modelName) {
+                modelsToTry.add(fb);
+            }
+        }
+
+        String lastError = '';
+        for (String model : modelsToTry) {
+            // Attempt with 1 retry per model
+            for (Integer attempt = 0; attempt < 2; attempt++) {
+                try {
+                    String result = invokeLLM(body, model);
+                    if (result != null) {
+                        return result;
+                    }
+                } catch (Exception ex) {
+                    lastError = ex.getMessage();
+                    System.debug(LoggingLevel.WARN,
+                        'LLM call failed — model: ' + model
+                        + ' | attempt: ' + (attempt + 1)
+                        + ' | error: ' + ex.getMessage());
+                }
+            }
+        }
+
+        throw buildException(
+            'Unable to reach the AI service after trying multiple models. '
+            + 'Please try again in a moment. (Last error: ' + lastError + ')'
+        );
+    }
+
+    /**
+     * Single LLM invocation — extracted for retry/fallback reuse.
+     */
+    private static String invokeLLM(
+        aiplatform.ModelsAPI_ChatGenerationsRequest body,
+        String modelName
+    ) {
+        aiplatform.ModelsAPI modelsAPI = new aiplatform.ModelsAPI();
+
         aiplatform.ModelsAPI.createChatGenerations_Request request =
             new aiplatform.ModelsAPI.createChatGenerations_Request();
         request.modelName = modelName;
         request.body      = body;
 
-        // Execute with error handling for callout failures
-        aiplatform.ModelsAPI.createChatGenerations_Response response;
-        try {
-            response = modelsAPI.createChatGenerations(request);
-        } catch (Exception ex) {
-            throw buildException(
-                'Unable to reach the AI service. Please try again in a moment.'
-            );
-        }
+        aiplatform.ModelsAPI.createChatGenerations_Response response =
+            modelsAPI.createChatGenerations(request);
 
-        // Extract generated text
         if (response.Code200 != null
             && response.Code200.generationDetails != null
             && response.Code200.generationDetails.generations != null
@@ -322,9 +475,7 @@ public with sharing class BIAssistantController {
             return response.Code200.generationDetails.generations[0].content;
         }
 
-        throw buildException(
-            'The AI service returned an unexpected response. Please try again.'
-        );
+        return null; // Empty response — triggers retry
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -380,9 +531,9 @@ public with sharing class BIAssistantController {
             } catch (QueryException qex) {
                 System.debug(LoggingLevel.ERROR,
                     'Query failed — SOQL: ' + qe.soql + ' | Error: ' + qex.getMessage());
+                String errorHint = categorizeQueryError(qex.getMessage());
                 throw buildException(
-                    'Query failed: ' + qe.label + '. The AI may have used an invalid field or relationship. '
-                    + 'Please try rephrasing your question.'
+                    'Query failed: ' + qe.label + '. ' + errorHint
                 );
             }
 
@@ -474,6 +625,37 @@ public with sharing class BIAssistantController {
 
         if (cleaned.isEmpty()) return soql; // safety: never remove all fields
         return prefix + String.join(cleaned, ',') + suffix;
+    }
+
+    /**
+     * Categorize a SOQL QueryException into a user-friendly hint so the user
+     * knows what went wrong and how to rephrase.
+     */
+    @TestVisible
+    private static String categorizeQueryError(String errorMsg) {
+        if (errorMsg == null) {
+            return 'An unexpected query error occurred. Please try rephrasing your question.';
+        }
+        String lower = errorMsg.toLowerCase();
+        if (lower.contains('no such column') || lower.contains('no such field')) {
+            return 'The AI referenced a field that does not exist. Try asking about standard fields like Name, Status, or Amount.';
+        }
+        if (lower.contains('field must be grouped or aggregated')) {
+            return 'The AI mixed aggregate functions (COUNT, SUM) with regular fields incorrectly. Try rephrasing — for example, "show me totals by stage" instead of listing individual records.';
+        }
+        if (lower.contains('relationship') && lower.contains('not')) {
+            return 'The AI used a relationship path that does not exist. Try asking about direct object fields (e.g., "account name" instead of a deeply nested relationship).';
+        }
+        if (lower.contains('malformed') || lower.contains('unexpected token')) {
+            return 'The AI generated invalid query syntax. Please try rephrasing with simpler wording.';
+        }
+        if (lower.contains('sobject type') && lower.contains('not supported')) {
+            return 'The AI tried to query an unsupported object. Supported objects include Account, Contact, Opportunity, Lead, Case, Task, and Event.';
+        }
+        if (lower.contains('implementation restriction') || lower.contains('non-selective')) {
+            return 'The query was too broad for Salesforce to process efficiently. Try adding filters — for example, "from this quarter" or "for high-priority cases".';
+        }
+        return 'The AI may have used an invalid field or relationship. Please try rephrasing your question.';
     }
 
     private static String stripCodeFences(String text) {

@@ -192,11 +192,42 @@ export default class BiChart extends LightningElement {
             };
         }
 
+        // Add click handler for drilldown
+        config.options.onClick = (evt, elements) => {
+            if (elements && elements.length > 0) {
+                const element = elements[0];
+                const datasetIndex = element.datasetIndex;
+                const index = element.index;
+                const label = config.data.labels ? config.data.labels[index] : '';
+                const value = config.data.datasets[datasetIndex]
+                    ? config.data.datasets[datasetIndex].data[index]
+                    : null;
+                const chartTitle = config.title || '';
+
+                this.dispatchEvent(new CustomEvent('drilldown', {
+                    detail: { label, value, chartTitle },
+                    bubbles: true,
+                    composed: true
+                }));
+            }
+        };
+
         this.chart = new window.Chart(ctx, {
             type: config.type,
             data: config.data,
             options: config.options
         });
+    }
+
+    /**
+     * Export the chart as a PNG image data URL.
+     */
+    @api
+    exportAsImage() {
+        if (this.chart) {
+            return this.chart.toBase64Image();
+        }
+        return null;
     }
 
     disconnectedCallback() {

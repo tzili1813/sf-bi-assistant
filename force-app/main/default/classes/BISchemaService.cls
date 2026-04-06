@@ -39,10 +39,51 @@ public with sharing class BISchemaService {
 
     private static final Integer MAX_FIELDS_PER_OBJECT = 40;
 
+    // In-transaction cache — avoids redundant Schema.getGlobalDescribe() calls
+    // within the same Apex execution context (e.g., both Pass 1 and Pass 2).
+    private static String cachedSchemaContext;
+
     /**
      * Returns a compact schema description for injection into an LLM prompt.
+     * Uses in-transaction caching and optionally Platform Cache (if available).
      */
     public static String getSchemaContext() {
+        // 1. In-transaction cache (fastest)
+        if (cachedSchemaContext != null) {
+            return cachedSchemaContext;
+        }
+
+        // 2. Platform Cache (survives across requests — 1 hour TTL)
+        try {
+            Cache.OrgPartition part = Cache.Org.getPartition('local.BIAssistant');
+            String cached = (String) part.get('schemaContext');
+            if (cached != null) {
+                cachedSchemaContext = cached;
+                return cached;
+            }
+        } catch (Exception ex) {
+            // Platform Cache not available or partition not configured — continue
+        }
+
+        // 3. Build from scratch
+        String result = buildSchemaContext();
+        cachedSchemaContext = result;
+
+        // Try to store in Platform Cache for next request
+        try {
+            Cache.OrgPartition part = Cache.Org.getPartition('local.BIAssistant');
+            part.put('schemaContext', result, 3600); // 1 hour TTL
+        } catch (Exception ex) {
+            // Platform Cache not available — in-transaction cache still works
+        }
+
+        return result;
+    }
+
+    /**
+     * Core schema builder — describes all objects and their fields.
+     */
+    private static String buildSchemaContext() {
         List<String> sections = new List<String>();
 
         for (String objName : OBJECTS_TO_DESCRIBE) {

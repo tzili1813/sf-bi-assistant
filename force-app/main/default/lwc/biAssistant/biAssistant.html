@@ -31,15 +31,121 @@
                                     <div class="analysis-content"
                                          lwc:dom="manual"
                                          data-msg-id={msg.id}></div>
-                                    <!-- Charts -->
+                                    <!-- Charts (with drilldown) -->
                                     <template if:true={msg.visualizations}>
                                         <template for:each={msg.visualizations} for:item="viz">
                                             <c-bi-chart
                                                 key={viz.id}
                                                 chart-config={viz}
                                                 height="300"
+                                                ondrilldown={handleDrilldown}
                                             ></c-bi-chart>
                                         </template>
+                                    </template>
+                                    <!-- Suggested Actions -->
+                                    <template if:true={msg.hasActions}>
+                                        <div class="action-section">
+                                            <p class="action-section-title">
+                                                <lightning-icon icon-name="utility:light_bulb" size="xx-small" class="slds-m-right_xx-small"></lightning-icon>
+                                                Suggested Actions
+                                            </p>
+                                            <template for:each={msg.suggestedActions} for:item="action">
+                                                <template if:false={action.dismissed}>
+                                                    <div key={action.proposalId} class="action-card">
+                                                        <template if:true={action.completed}>
+                                                            <div class="action-completed">
+                                                                <lightning-icon icon-name="utility:check" size="xx-small" variant="success" class="slds-m-right_xx-small"></lightning-icon>
+                                                                <span class="action-label">{action.label}</span>
+                                                                <template if:true={action.recordUrl}>
+                                                                    &mdash; <a href={action.recordUrl}>View Record</a>
+                                                                </template>
+                                                            </div>
+                                                        </template>
+                                                        <template if:true={action.failed}>
+                                                            <div class="action-failed">
+                                                                <lightning-icon icon-name="utility:error" size="xx-small" variant="error" class="slds-m-right_xx-small"></lightning-icon>
+                                                                <span class="action-label">{action.label}</span>
+                                                                <span class="action-error-msg"> &mdash; {action.errorMessage}</span>
+                                                            </div>
+                                                        </template>
+                                                        <template if:false={action.completed}>
+                                                            <template if:false={action.failed}>
+                                                                <div class="action-pending">
+                                                                    <div class="action-content">
+                                                                        <span class="action-label">{action.label}</span>
+                                                                        <span class="action-reasoning">{action.reasoning}</span>
+                                                                    </div>
+                                                                    <div class="action-buttons">
+                                                                        <lightning-button
+                                                                            label="Execute"
+                                                                            variant="brand"
+                                                                            icon-name="utility:play"
+                                                                            data-action-id={action.proposalId}
+                                                                            data-msg-id={msg.id}
+                                                                            onclick={handleActionConfirm}
+                                                                            disabled={action.executing}
+                                                                        ></lightning-button>
+                                                                        <lightning-button
+                                                                            label="Dismiss"
+                                                                            variant="neutral"
+                                                                            data-action-id={action.proposalId}
+                                                                            data-msg-id={msg.id}
+                                                                            onclick={handleActionDismiss}
+                                                                        ></lightning-button>
+                                                                    </div>
+                                                                </div>
+                                                            </template>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                            </template>
+                                        </div>
+                                    </template>
+                                    <!-- Toolbar: SOQL Toggle + CSV Export -->
+                                    <template if:true={msg.hasSoql}>
+                                        <div class="soql-section">
+                                            <div class="toolbar-row">
+                                                <button class="slds-button slds-button_reset soql-toggle-btn"
+                                                        data-msg-id={msg.id}
+                                                        onclick={handleToggleSoql}>
+                                                    <lightning-icon
+                                                        icon-name="utility:code"
+                                                        size="xx-small"
+                                                        class="slds-m-right_xx-small"
+                                                    ></lightning-icon>
+                                                    <template if:false={msg.showSoql}>Show queries</template>
+                                                    <template if:true={msg.showSoql}>Hide queries</template>
+                                                </button>
+                                                <template if:true={msg.hasExportData}>
+                                                    <button class="slds-button slds-button_reset soql-toggle-btn"
+                                                            data-msg-id={msg.id}
+                                                            onclick={handleExportCsv}>
+                                                        <lightning-icon
+                                                            icon-name="utility:download"
+                                                            size="xx-small"
+                                                            class="slds-m-right_xx-small"
+                                                        ></lightning-icon>
+                                                        Export CSV
+                                                    </button>
+                                                </template>
+                                            </div>
+                                            <template if:true={msg.showSoql}>
+                                                <pre class="soql-display">{msg.soqlText}</pre>
+                                            </template>
+                                        </div>
+                                    </template>
+                                    <!-- Follow-up Suggestions -->
+                                    <template if:true={msg.suggestedFollowUps}>
+                                        <div class="suggestion-chips">
+                                            <template for:each={msg.suggestedFollowUps} for:item="sug">
+                                                <button key={sug.id}
+                                                        class="slds-button suggestion-chip"
+                                                        data-question={sug.text}
+                                                        onclick={handleSuggestionClick}
+                                                        disabled={isLoading}
+                                                >{sug.text}</button>
+                                            </template>
+                                        </div>
                                     </template>
                                 </template>
                                 <!-- Loading state -->

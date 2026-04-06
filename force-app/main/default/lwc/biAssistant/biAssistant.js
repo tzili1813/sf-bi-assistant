@@ -1,5 +1,8 @@
 import { LightningElement, track, wire } from 'lwc';
+import { ShowToastEvent } from 'lightning/platformShowToastEvent';
+import LightningConfirm from 'lightning/confirm';
 import askQuestion from '@salesforce/apex/BIAssistantController.askQuestion';
+import confirmAction from '@salesforce/apex/BIAssistantController.confirmAction';
 import getAvailableModels from '@salesforce/apex/BIAssistantController.getAvailableModels';
 
 /**
@@ -17,6 +20,8 @@ import getAvailableModels from '@salesforce/apex/BIAssistantController.getAvaila
  * The `conversationHistory` array (List<BIChatMessage>) is what gets sent
  * to the Models API as the message list — enabling multi-turn context.
  */
+const STORAGE_KEY = 'bi-assistant-state';
+
 export default class BiAssistant extends LightningElement {
 
     question = '';
@@ -49,7 +54,8 @@ export default class BiAssistant extends LightningElement {
     /**
      * Display messages shown in the UI thread.
      * Each entry: { id, type, text, isUser, isAssistant, isLoading, isError,
-     *               containerClass, bubbleClass, html }
+     *               containerClass, bubbleClass, html, visualizations,
+     *               queries, showSoql, suggestedFollowUps }
      */
     @track displayMessages = [];
 
@@ -66,6 +72,12 @@ export default class BiAssistant extends LightningElement {
         'What is our average case resolution time this month?',
         'Show me SLA compliance by entitlement'
     ];
+
+    // ── Lifecycle ──────────────────────────────────────────────
+
+    connectedCallback() {
+        this._restoreState();
+    }
 
     // ── Computed ─────────────────────────────────────────────────
 
@@ -102,10 +114,152 @@ export default class BiAssistant extends LightningElement {
         this.handleAsk();
     }
 
+    handleSuggestionClick(event) {
+        this.question = event.target.dataset.question;
+        this.handleAsk();
+    }
+
     handleClearConversation() {
         this.conversationHistory = [];
         this.displayMessages = [];
         this.question = '';
+        this._clearStoredState();
+    }
+
+    handleToggleSoql(event) {
+        const msgId = event.target.dataset.msgId;
+        this.displayMessages = this.displayMessages.map(m => {
+            if (m.id === msgId) {
+                return { ...m, showSoql: !m.showSoql };
+            }
+            return m;
+        });
+    }
+
+    async handleActionConfirm(event) {
+        const actionId = event.target.dataset.actionId;
+        const msgId = event.target.dataset.msgId;
+
+        // Find the action proposal
+        const msg = this.displayMessages.find(m => m.id === msgId);
+        if (!msg || !msg.suggestedActions) return;
+        const action = msg.suggestedActions.find(a => a.proposalId === actionId);
+        if (!action) return;
+
+        // Confirmation dialog
+        const confirmed = await LightningConfirm.open({
+            message: action.label + '\n\nReason: ' + (action.reasoning || 'Recommended based on the analysis.'),
+            label: 'Confirm Action',
+            theme: 'warning'
+        });
+
+        if (!confirmed) return;
+
+        // Mark action as executing
+        this._updateAction(msgId, actionId, { executing: true });
+
+        try {
+            const result = await confirmAction({
+                actionJson: JSON.stringify(action)
+            });
+
+            if (result.success) {
+                this._updateAction(msgId, actionId, {
+                    executing: false,
+                    completed: true,
+                    recordUrl: result.recordUrl,
+                    recordId: result.recordId
+                });
+                this.dispatchEvent(new ShowToastEvent({
+                    title: 'Action Completed',
+                    message: action.label,
+                    variant: 'success'
+                }));
+            } else {
+                this._updateAction(msgId, actionId, {
+                    executing: false,
+                    failed: true,
+                    errorMessage: result.errorMessage
+                });
+                this.dispatchEvent(new ShowToastEvent({
+                    title: 'Action Failed',
+                    message: result.errorMessage,
+                    variant: 'error'
+                }));
+            }
+        } catch (error) {
+            const errMsg = error.body ? error.body.message : error.message;
+            this._updateAction(msgId, actionId, {
+                executing: false,
+                failed: true,
+                errorMessage: errMsg
+            });
+        }
+
+        this._saveState();
+    }
+
+    handleActionDismiss(event) {
+        const actionId = event.target.dataset.actionId;
+        const msgId = event.target.dataset.msgId;
+        this._updateAction(msgId, actionId, { dismissed: true });
+        this._saveState();
+    }
+
+    _updateAction(msgId, actionId, updates) {
+        this.displayMessages = this.displayMessages.map(m => {
+            if (m.id === msgId && m.suggestedActions) {
+                return {
+                    ...m,
+                    suggestedActions: m.suggestedActions.map(a => {
+                        if (a.proposalId === actionId) {
+                            return { ...a, ...updates };
+                        }
+                        return a;
+                    })
+                };
+            }
+            return m;
+        });
+    }
+
+    handleDrilldown(event) {
+        const { label, chartTitle } = event.detail;
+        if (label) {
+            this.question = `Tell me more about "${label}" from the ${chartTitle || 'chart'}`;
+            this.handleAsk();
+        }
+    }
+
+    handleExportCsv(event) {
+        const msgId = event.target.dataset.msgId;
+        const msg = this.displayMessages.find(m => m.id === msgId);
+        if (!msg || !msg.queryRows) return;
+
+        // Build CSV from stored query rows
+        const rows = msg.queryRows;
+        if (!rows || rows.length === 0) return;
+
+        const headers = Object.keys(rows[0]);
+        const csvLines = [headers.join(',')];
+        for (const row of rows) {
+            const values = headers.map(h => {
+                let val = row[h];
+                if (val === null || val === undefined) val = '';
+                val = String(val).replace(/"/g, '""');
+                return `"${val}"`;
+            });
+            csvLines.push(values.join(','));
+        }
+
+        const csvContent = csvLines.join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'bi-assistant-export.csv';
+        link.click();
+        URL.revokeObjectURL(url);
     }
 
     // ── Main ask flow ───────────────────────────────────────────
@@ -141,8 +295,7 @@ export default class BiAssistant extends LightningElement {
                 // Show error in thread
                 this._addDisplayMessage('error', result.errorMessage);
             } else {
-                // Parse response: HTML ===VISUALIZATIONS=== JSON array
-                // Falls back to plain HTML if delimiter is not found
+                // Parse response: HTML ===VISUALIZATIONS=== JSON ===SUGGESTIONS=== JSON
                 const response = result.analysisHtml || '';
                 let htmlContent = response;
                 let visualizations = [];
@@ -168,8 +321,38 @@ export default class BiAssistant extends LightningElement {
                     }
                 }
 
+                // Build SOQL display text and gather rows for CSV export
+                let soqlText = '';
+                let allRows = [];
+                if (result.queries && result.queries.length > 0) {
+                    soqlText = result.queries
+                        .map(q => `-- ${q.label} (${q.recordCount} records)\n${q.soql}`)
+                        .join('\n\n');
+                    // Flatten rows from all queries for CSV
+                    for (const q of result.queries) {
+                        if (q.rows) {
+                            allRows = allRows.concat(q.rows);
+                        }
+                    }
+                }
+
+                // Gather follow-up suggestions and actions
+                const suggestions = result.suggestedFollowUps || [];
+                const actions = (result.suggestedActions || []).map((a, i) => ({
+                    ...a,
+                    proposalId: a.proposalId || `action-${i}`,
+                    executing: false,
+                    completed: false,
+                    failed: false,
+                    dismissed: false,
+                    errorMessage: null,
+                    recordUrl: null,
+                    recordId: null
+                }));
+
                 const assistantId = this._addDisplayMessage(
-                    'assistant', '', htmlContent, visualizations
+                    'assistant', '', htmlContent, visualizations,
+                    soqlText, suggestions, actions, allRows
                 );
 
                 // Update conversation history for next turn
@@ -183,6 +366,9 @@ export default class BiAssistant extends LightningElement {
                     this._renderHtml(assistantId, htmlContent);
                 }, 0);
             }
+
+            // Persist conversation state
+            this._saveState();
         } catch (error) {
             this._removeDisplayMessage(loadingId);
             const msg = error.body ? error.body.message : error.message || 'An unexpected error occurred.';
@@ -196,7 +382,7 @@ export default class BiAssistant extends LightningElement {
 
     // ── Display message management ──────────────────────────────
 
-    _addDisplayMessage(type, text, html, visualizations) {
+    _addDisplayMessage(type, text, html, visualizations, soqlText, suggestions, actions, queryRows) {
         const id = 'msg-' + (this.msgCounter++);
         const msg = {
             id,
@@ -205,6 +391,16 @@ export default class BiAssistant extends LightningElement {
             html: html || '',
             visualizations: visualizations && visualizations.length > 0
                 ? visualizations : null,
+            soqlText: soqlText || '',
+            showSoql: false,
+            hasSoql: Boolean(soqlText),
+            queryRows: queryRows && queryRows.length > 0 ? queryRows : null,
+            hasExportData: queryRows && queryRows.length > 0,
+            suggestedFollowUps: suggestions && suggestions.length > 0
+                ? suggestions.map((s, i) => ({ id: `sug-${id}-${i}`, text: s }))
+                : null,
+            suggestedActions: actions && actions.length > 0 ? actions : null,
+            hasActions: actions && actions.length > 0,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             isUser:      type === 'user',
             isAssistant: type === 'assistant',
@@ -249,6 +445,65 @@ export default class BiAssistant extends LightningElement {
                 el.innerHTML = this._sanitizeHtml(html);
                 break;
             }
+        }
+    }
+
+    /**
+     * Re-render all assistant HTML after restoring from localStorage.
+     */
+    _rerenderAllHtml() {
+        // eslint-disable-next-line @lwc/lwc/no-async-operation
+        setTimeout(() => {
+            for (const msg of this.displayMessages) {
+                if (msg.isAssistant && msg.html) {
+                    this._renderHtml(msg.id, msg.html);
+                }
+            }
+        }, 0);
+    }
+
+    // ── Conversation persistence (localStorage) ──────────────────
+
+    _saveState() {
+        try {
+            const state = {
+                displayMessages: this.displayMessages,
+                conversationHistory: this.conversationHistory,
+                msgCounter: this.msgCounter,
+                selectedModel: this.selectedModel
+            };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {
+            // localStorage full or unavailable — fail silently
+        }
+    }
+
+    _restoreState() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return;
+            const state = JSON.parse(raw);
+            if (state.displayMessages && state.displayMessages.length > 0) {
+                this.displayMessages = state.displayMessages;
+                this.conversationHistory = state.conversationHistory || [];
+                this.msgCounter = state.msgCounter || this.displayMessages.length;
+                if (state.selectedModel) {
+                    this.selectedModel = state.selectedModel;
+                }
+                // Re-inject HTML into lwc:dom="manual" containers
+                this._rerenderAllHtml();
+            }
+        } catch (e) {
+            // Corrupt state — start fresh
+            this._clearStoredState();
+        }
+    }
+
+    _clearStoredState() {
+        try {
+            localStorage.removeItem(STORAGE_KEY);
+        } catch (e) {
+            // Ignore
         }
     }
 
